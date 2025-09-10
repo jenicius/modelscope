@@ -113,8 +113,6 @@ class MovieSceneSegmentationModel(TorchModel):
         infer_pred = []
         infer_result = {}
         
-        self.shot_detector = shot_detector()
-        self.shot_detector.init(**self.cfg.preprocessor.shot_detect)
         self.shot_detector.start()
 
         for i in tqdm(range(cnt)):
@@ -218,6 +216,8 @@ class MovieSceneSegmentationModel(TorchModel):
 
     def preprocess(self, inputs):
         logger.info('Begin shot detect......')
+        self.shot_detector = shot_detector()
+        self.shot_detector.init(**self.cfg.preprocessor.shot_detect)
         shot_timecode_lst, anno, shot2keyf = self.shot_detector.shot_detect(
             inputs, **self.cfg.preprocessor.shot_detect)
         logger.info('Shot detect done!')
