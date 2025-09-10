@@ -4,7 +4,7 @@
 import math
 import os
 import os.path as osp
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import einops
 import numpy as np
@@ -114,7 +114,7 @@ class MovieSceneSegmentationModel(TorchModel):
         infer_result = {}
         self.shot_detector.start()
 
-        for i in range(cnt):
+        for i in tqdm(range(cnt)):
             start = i * bs
             end = (i + 1) * bs if (i + 1) * bs < shot_num else shot_num
 
@@ -122,12 +122,54 @@ class MovieSceneSegmentationModel(TorchModel):
 
             shot_start_idx = batch_shot_idx_lst[0][0]
             shot_end_idx = batch_shot_idx_lst[-1][-1]
-            batch_timecode_lst = {
-                i: shot_timecode_lst[i]
-                for i in range(shot_start_idx, shot_end_idx + 1)
-            }
-            batch_shot_keyf_lst = self.shot_detector.get_frame_img(
-                batch_timecode_lst, shot_start_idx, shot_num)
+            
+            # batch_timecode_lst = {
+            #     i: shot_timecode_lst[i]
+            #     for i in range(shot_start_idx, shot_end_idx + 1)
+            # }
+            # batch_shot_keyf_lst = self.shot_detector.get_frame_img(
+            #     batch_timecode_lst, shot_start_idx, shot_num)
+            
+            
+            # --- START OF THE NEW, ROBUST FIX ---
+            
+            # 1. Collect ALL unique timecodes needed for this entire batch.
+            all_needed_timecodes = set()
+            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
+                # Ensure the shot index is valid
+                if shot_idx < len(shot_timecode_lst):
+                    for tc in shot_timecode_lst[shot_idx]:
+                        all_needed_timecodes.add(tc)
+            
+            # 2. Sort the timecodes to respect the sequential-read limitation.
+            sorted_unique_timecodes = sorted(list(all_needed_timecodes))
+            
+            # 3. Create a temporary dictionary for the detector.
+            # The keys (indices) don't matter, only the sorted values.
+            batch_timecode_dict = {i: tc for i, tc in enumerate(sorted_unique_timecodes)}
+
+            # 4. Fetch all frames in ONE sequential pass. This is the key change.
+            # `get_frame_img_from_list` is a hypothetical better name; the original function works this way.
+            # This call is now safe and efficient.
+            retrieved_frames = self.shot_detector.get_frame_img(
+                batch_timecode_dict, 0, len(batch_timecode_dict))
+
+            # 5. Create a lookup map from timecode to the retrieved image.
+            timecode_to_image_map = {tc: img for tc, img in zip(sorted_unique_timecodes, retrieved_frames)}
+
+            # 6. Reconstruct the original `batch_shot_keyf_lst` structure safely.
+            batch_shot_keyf_lst = []
+            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
+                shot_frames = []
+                if shot_idx < len(shot_timecode_lst):
+                    for tc in shot_timecode_lst[shot_idx]:
+                        # Look up the pre-fetched image. If it wasn't found (e.g., out of bounds), this will return None.
+                        img = timecode_to_image_map.get(tc)
+                        if img: # Only add valid images
+                            shot_frames.append(img)
+                batch_shot_keyf_lst.append(shot_frames)
+            
+            # --- END OF THE NEW, ROBUST FIX ---
             inputs = self.get_batch_input(batch_shot_keyf_lst, shot_start_idx,
                                           batch_shot_idx_lst)
 
@@ -193,57 +235,25 @@ class MovieSceneSegmentationModel(TorchModel):
             print(f'Split scene video saved to {re_dir}')
         return len(scene_list), scene_dict_lst, shot_num, shot_dict_lst
 
-    def get_batch_input(self, shot_keyf_lst: List, shot_start_idx: int,
-                        shot_idx_lst: List) -> List[torch.Tensor]:
-        """
-        Constructs a batch of input tensors from keyframe images.
+    def get_batch_input(self, shot_keyf_lst, shot_start_idx, shot_idx_lst):
 
-        This function ensures that each shot is represented by a fixed number
-        of keyframes (by padding with black frames or truncating). This prevents
-        errors from empty shot lists or variable numbers of keyframes.
-        """
-        FIXED_KEYFRAMES_PER_SHOT = 3
-        C, H, W = 3, 224, 224
+        single_shot_feat = []
+        for idx, one_shot in enumerate(shot_keyf_lst):
+            one_shot = [
+                self.test_transform(one_frame) for one_frame in one_shot
+            ]
+            one_shot = torch.stack(one_shot, dim=0)
+            single_shot_feat.append(one_shot)
 
-        all_shot_tensors = []
-        for idx, one_shot_frames in enumerate(shot_keyf_lst):
-            
-            transformed_frames = [self.test_transform(frame) for frame in one_shot_frames]
-            num_available_frames = len(transformed_frames)
+        single_shot_feat = torch.stack(single_shot_feat, dim=0)
 
-            if num_available_frames < FIXED_KEYFRAMES_PER_SHOT:
-                padding_needed = FIXED_KEYFRAMES_PER_SHOT - num_available_frames
-                padding = torch.zeros(padding_needed, C, H, W)
-                
-                if num_available_frames > 0:
-                    # First, stack the existing 3D frames into a single 4D tensor
-                    stacked_frames = torch.stack(transformed_frames, dim=0)
-                    # Now, concatenate the two 4D tensors
-                    shot_tensor = torch.cat([stacked_frames, padding], dim=0)
-                else:
-                    # If there were no frames, the tensor is just the padding
-                    shot_tensor = padding
-            
-            elif num_available_frames > FIXED_KEYFRAMES_PER_SHOT:
-                shot_tensor = torch.stack(transformed_frames[:FIXED_KEYFRAMES_PER_SHOT], dim=0)
-            
-            else: # Exactly the right number
-                shot_tensor = torch.stack(transformed_frames, dim=0)
+        shot_feat = []
+        for idx, shot_idx in enumerate(shot_idx_lst):
+            shot_idx_ = shot_idx - shot_start_idx
+            _one_shot = single_shot_feat[shot_idx_]
+            shot_feat.append(_one_shot)
 
-            all_shot_tensors.append(shot_tensor)
-
-        if not all_shot_tensors:
-            return []
-
-        single_shot_feat_tensor = torch.stack(all_shot_tensors, dim=0)
-
-        batch_inputs = []
-        for _, shot_idx in enumerate(shot_idx_lst):
-            relative_indices = shot_idx - shot_start_idx
-            context_window_tensor = single_shot_feat_tensor[relative_indices]
-            batch_inputs.append(context_window_tensor)
-
-        return batch_inputs
+        return shot_feat
 
     def preprocess(self, inputs):
         logger.info('Begin shot detect......')
