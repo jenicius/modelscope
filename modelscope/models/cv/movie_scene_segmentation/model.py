@@ -114,7 +114,7 @@ class MovieSceneSegmentationModel(TorchModel):
         infer_result = {}
         self.shot_detector.start()
 
-        for i in tqdm(range(cnt)):
+        for i in range(cnt):
             start = i * bs
             end = (i + 1) * bs if (i + 1) * bs < shot_num else shot_num
 
@@ -195,57 +195,51 @@ class MovieSceneSegmentationModel(TorchModel):
 
     def get_batch_input(self, shot_keyf_lst: List, shot_start_idx: int,
                         shot_idx_lst: List) -> List[torch.Tensor]:
-        # Define a fixed number of keyframes per shot.
-        # This should match what the model was trained on. A value of 3 is common.
+        """
+        Constructs a batch of input tensors from keyframe images.
+
+        This function ensures that each shot is represented by a fixed number
+        of keyframes (by padding with black frames or truncating). This prevents
+        errors from empty shot lists or variable numbers of keyframes.
+        """
         FIXED_KEYFRAMES_PER_SHOT = 3
-        
-        # Define the dimensions C, H, W after transformation
         C, H, W = 3, 224, 224
 
         all_shot_tensors = []
         for idx, one_shot_frames in enumerate(shot_keyf_lst):
             
-            # Transform the available frames first
             transformed_frames = [self.test_transform(frame) for frame in one_shot_frames]
             num_available_frames = len(transformed_frames)
 
             if num_available_frames < FIXED_KEYFRAMES_PER_SHOT:
-                # Case 1: Fewer frames than required (includes the zero-frame case).
-                # We need to pad with black frames.
                 padding_needed = FIXED_KEYFRAMES_PER_SHOT - num_available_frames
                 padding = torch.zeros(padding_needed, C, H, W)
                 
-                # Combine existing frames (if any) with the padding
                 if num_available_frames > 0:
-                    shot_tensor = torch.cat(transformed_frames + [padding], dim=0)
+                    # First, stack the existing 3D frames into a single 4D tensor
+                    stacked_frames = torch.stack(transformed_frames, dim=0)
+                    # Now, concatenate the two 4D tensors
+                    shot_tensor = torch.cat([stacked_frames, padding], dim=0)
                 else:
-                    shot_tensor = padding # If there were no frames, the tensor is just the padding
+                    # If there were no frames, the tensor is just the padding
+                    shot_tensor = padding
             
             elif num_available_frames > FIXED_KEYFRAMES_PER_SHOT:
-                # Case 2: More frames than required. Truncate (take the first N).
                 shot_tensor = torch.stack(transformed_frames[:FIXED_KEYFRAMES_PER_SHOT], dim=0)
             
-            else:
-                # Case 3: Exactly the right number of frames.
+            else: # Exactly the right number
                 shot_tensor = torch.stack(transformed_frames, dim=0)
 
             all_shot_tensors.append(shot_tensor)
 
-        # If the entire batch of shots was empty for some reason, return empty list.
         if not all_shot_tensors:
             return []
 
-        # Now, `all_shot_tensors` is a list of tensors, each with shape [K, C, H, W].
-        # We stack them into a single large tensor for easy indexing.
-        # Shape becomes [Num_Shots_in_Batch, K, C, H, W]
         single_shot_feat_tensor = torch.stack(all_shot_tensors, dim=0)
 
-        # Assemble the context windows for the final batch
         batch_inputs = []
         for _, shot_idx in enumerate(shot_idx_lst):
-            # Adjust indices to be relative to the current batch
             relative_indices = shot_idx - shot_start_idx
-            # Gather the shots for this context window
             context_window_tensor = single_shot_feat_tensor[relative_indices]
             batch_inputs.append(context_window_tensor)
 
