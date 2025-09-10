@@ -112,6 +112,9 @@ class MovieSceneSegmentationModel(TorchModel):
 
         infer_pred = []
         infer_result = {}
+        
+        self.shot_detector = shot_detector()
+        self.shot_detector.init(**self.cfg.preprocessor.shot_detect)
         self.shot_detector.start()
 
         for i in tqdm(range(cnt)):
@@ -122,54 +125,12 @@ class MovieSceneSegmentationModel(TorchModel):
 
             shot_start_idx = batch_shot_idx_lst[0][0]
             shot_end_idx = batch_shot_idx_lst[-1][-1]
-            
-            # batch_timecode_lst = {
-            #     i: shot_timecode_lst[i]
-            #     for i in range(shot_start_idx, shot_end_idx + 1)
-            # }
-            # batch_shot_keyf_lst = self.shot_detector.get_frame_img(
-            #     batch_timecode_lst, shot_start_idx, shot_num)
-            
-            
-            # --- START OF THE NEW, ROBUST FIX ---
-            
-            # 1. Collect ALL unique timecodes needed for this entire batch.
-            all_needed_timecodes = set()
-            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
-                # Ensure the shot index is valid
-                if shot_idx < len(shot_timecode_lst):
-                    for tc in shot_timecode_lst[shot_idx]:
-                        all_needed_timecodes.add(tc)
-            
-            # 2. Sort the timecodes to respect the sequential-read limitation.
-            sorted_unique_timecodes = sorted(list(all_needed_timecodes))
-            
-            # 3. Create a temporary dictionary for the detector.
-            # The keys (indices) don't matter, only the sorted values.
-            batch_timecode_dict = {i: tc for i, tc in enumerate(sorted_unique_timecodes)}
-
-            # 4. Fetch all frames in ONE sequential pass. This is the key change.
-            # `get_frame_img_from_list` is a hypothetical better name; the original function works this way.
-            # This call is now safe and efficient.
-            retrieved_frames = self.shot_detector.get_frame_img(
-                batch_timecode_dict, 0, len(batch_timecode_dict))
-
-            # 5. Create a lookup map from timecode to the retrieved image.
-            timecode_to_image_map = {tc: img for tc, img in zip(sorted_unique_timecodes, retrieved_frames)}
-
-            # 6. Reconstruct the original `batch_shot_keyf_lst` structure safely.
-            batch_shot_keyf_lst = []
-            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
-                shot_frames = []
-                if shot_idx < len(shot_timecode_lst):
-                    for tc in shot_timecode_lst[shot_idx]:
-                        # Look up the pre-fetched image. If it wasn't found (e.g., out of bounds), this will return None.
-                        img = timecode_to_image_map.get(tc)
-                        if img: # Only add valid images
-                            shot_frames.append(img)
-                batch_shot_keyf_lst.append(shot_frames)
-            
-            # --- END OF THE NEW, ROBUST FIX ---
+            batch_timecode_lst = {
+                i: shot_timecode_lst[i]
+                for i in range(shot_start_idx, shot_end_idx + 1)
+            }
+            batch_shot_keyf_lst = self.shot_detector.get_frame_img(
+                batch_timecode_lst, shot_start_idx, shot_num)
             inputs = self.get_batch_input(batch_shot_keyf_lst, shot_start_idx,
                                           batch_shot_idx_lst)
 
