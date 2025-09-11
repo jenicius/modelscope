@@ -4,7 +4,7 @@
 import math
 import os
 import os.path as osp
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import einops
 import numpy as np
@@ -214,37 +214,70 @@ class MovieSceneSegmentationModel(TorchModel):
     #         shot_feat.append(_one_shot)
 
     #     return shot_feat
-    
-    
-    def get_batch_input(self, shot_keyf_lst, shot_start_idx, shot_idx_lst):
-        single_shot_feat = []
 
-        for one_shot in shot_keyf_lst:
-            frames = [self.test_transform(f) for f in one_shot if f is not None]
+    def get_batch_input(self, shot_keyf_lst: List, shot_start_idx: int,
+                        shot_idx_lst: List) -> List[torch.Tensor]:
+        # Define a fixed number of keyframes per shot.
+        # This should match what the model expects. 3 is a common value.
+        FIXED_KEYFRAMES_PER_SHOT = 3
+        
+        # Define the dimensions C, H, W after transformation
+        C, H, W = 3, 224, 224
 
-            if len(frames) == 0:
-                # Skip this shot entirely
-                continue
+        all_shot_tensors = []
+        # This loop processes all shots provided for the batch context
+        for one_shot_frames in shot_keyf_lst:
+            
+            # First, transform all available frames into 3D tensors
+            transformed_frames = [self.test_transform(frame) for frame in one_shot_frames]
+            num_available_frames = len(transformed_frames)
 
-            one_shot_tensor = torch.stack(frames, dim=0)  # (k, C, H, W)
-            single_shot_feat.append(one_shot_tensor)
+            # --- Core Logic: Enforce Uniform Shape ---
+            if num_available_frames < FIXED_KEYFRAMES_PER_SHOT:
+                # Case 1: Too few frames (or zero). We need to pad.
+                padding_needed = FIXED_KEYFRAMES_PER_SHOT - num_available_frames
+                padding = torch.zeros(padding_needed, C, H, W) # 4D padding tensor
+                
+                if num_available_frames > 0:
+                    # Stack existing frames into a 4D tensor, then concatenate with padding
+                    stacked_frames = torch.stack(transformed_frames, dim=0)
+                    shot_tensor = torch.cat([stacked_frames, padding], dim=0)
+                else:
+                    # If there were no frames at all, the tensor is just the padding
+                    shot_tensor = padding
+            
+            elif num_available_frames > FIXED_KEYFRAMES_PER_SHOT:
+                # Case 2: Too many frames. Truncate the list.
+                shot_tensor = torch.stack(transformed_frames[:FIXED_KEYFRAMES_PER_SHOT], dim=0)
+            
+            else:
+                # Case 3: Exactly the right number of frames.
+                shot_tensor = torch.stack(transformed_frames, dim=0)
 
-        if len(single_shot_feat) == 0:
-            # No valid shots at all → return empty
+            all_shot_tensors.append(shot_tensor)
+
+        # After the loop, `all_shot_tensors` is a list of 4D tensors,
+        # all with the exact same shape: [FIXED_KEYFRAMES_PER_SHOT, C, H, W]
+
+        if not all_shot_tensors:
             return []
 
-        single_shot_feat = torch.stack(single_shot_feat, dim=0)  # (S, k, C, H, W)
+        # Stack all the 4D shot tensors into a single 5D tensor for easy indexing.
+        # Shape: [Num_Shots_in_Batch, FIXED_KEYFRAMES_PER_SHOT, C, H, W]
+        single_shot_feat_tensor = torch.stack(all_shot_tensors, dim=0)
 
-        shot_feat = []
-        for shot_idx in shot_idx_lst:
-            shot_idx_ = shot_idx - shot_start_idx
-            if 0 <= shot_idx_ < single_shot_feat.shape[0]:
-                shot_feat.append(single_shot_feat[shot_idx_])
-            # else: skip silently
+        # Assemble the final context windows for the model input
+        batch_inputs = []
+        for _, shot_idx in enumerate(shot_idx_lst):
+            # Adjust indices to be relative to the current chunk of shots
+            relative_indices = shot_idx - shot_start_idx
+            # Use advanced indexing to gather the shots for this context window
+            context_window_tensor = single_shot_feat_tensor[relative_indices]
+            batch_inputs.append(context_window_tensor)
 
-        return shot_feat
-
-
+        return batch_inputs
+    
+    
     def preprocess(self, inputs):
         logger.info('Begin shot detect......')
         self.shot_detector = shot_detector()
