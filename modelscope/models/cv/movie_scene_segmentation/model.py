@@ -124,65 +124,11 @@ class MovieSceneSegmentationModel(TorchModel):
             shot_start_idx = batch_shot_idx_lst[0][0]
             shot_end_idx = batch_shot_idx_lst[-1][-1]
             
-            # batch_timecode_lst = {
-            #     i: shot_timecode_lst[i]
-            #     for i in range(shot_start_idx, shot_end_idx + 1)
-            # }
-            # batch_shot_keyf_lst = self.shot_detector.get_frame_img(batch_timecode_lst, shot_start_idx, shot_num)
-            
-            
-             # --- START: ROBUST FRAME FETCHING LOGIC ---
-
-            # 1. GATHER all unique timecodes needed for this entire batch.
-            # 1. GATHER unique timecodes using a list + a helper set.
-            unique_timecodes_list = []
-            seen_frame_numbers = set() # This set will store a HASHABLE property (the frame number)
-
-            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
-                if shot_idx < len(shot_timecode_lst):
-                    for tc in shot_timecode_lst[shot_idx]:
-                        frame_num = tc.get_frames() # Get the hashable integer frame number
-                        if frame_num not in seen_frame_numbers:
-                            seen_frame_numbers.add(frame_num)
-                            unique_timecodes_list.append(tc) # Add the original object to our list
-            
-            # 2. SORT the list of unique FrameTimecode objects.
-            # We sort by frame number to guarantee chronological order.
-            sorted_unique_timecodes = sorted(unique_timecodes_list, key=lambda x: x.get_frames())
-            
-            # 3. FETCH: Prepare a dummy dictionary for the existing get_frame_img function.
-            # Each timecode is treated as a separate "shot" with one keyframe.
-            timecode_dict_for_fetch = {idx: [tc] for idx, tc in enumerate(sorted_unique_timecodes)}
-
-            # Call the function. It will process this dictionary sequentially.
-            # The start_idx and num_shot parameters are now relative to our dummy dict.
-            retrieved_frames_nested = self.shot_detector.get_frame_img(
-                timecode_dict_for_fetch, 0, len(timecode_dict_for_fetch))
-            
-            # Flatten the result: from [[img1], [img2], ...] to [img1, img2, ...]
-            retrieved_frames_flat = [frame for sublist in retrieved_frames_nested for frame in sublist]
-
-            # 4. DISTRIBUTE: Create a lookup map.
-            # The KEY is the HASHABLE frame number, the VALUE is the image.
-            frame_num_to_image_map = {
-                tc.get_frames(): img 
-                for tc, img in zip(sorted_unique_timecodes, retrieved_frames_flat) 
-                if img is not None
+            batch_timecode_lst = {
+                i: shot_timecode_lst[i]
+                for i in range(shot_start_idx, shot_end_idx + 1)
             }
-
-            # 5. Reconstruct the original `batch_shot_keyf_lst` structure safely.
-            batch_shot_keyf_lst = []
-            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
-                shot_frames = []
-                if shot_idx < len(shot_timecode_lst):
-                    for tc in shot_timecode_lst[shot_idx]:
-                        # Use the frame number to look up the image in our new map.
-                        img = frame_num_to_image_map.get(tc.get_frames())
-                        if img:
-                            shot_frames.append(img)
-                batch_shot_keyf_lst.append(shot_frames)
-            
-            # --- END: ROBUST FRAME FETCHING LOGIC ---
+            batch_shot_keyf_lst = self.shot_detector.get_frame_img(batch_timecode_lst, shot_start_idx, shot_num)
             
             inputs = self.get_batch_input(batch_shot_keyf_lst, shot_start_idx,
                                           batch_shot_idx_lst)
@@ -249,25 +195,55 @@ class MovieSceneSegmentationModel(TorchModel):
             print(f'Split scene video saved to {re_dir}')
         return len(scene_list), scene_dict_lst, shot_num, shot_dict_lst
 
+    # def get_batch_input(self, shot_keyf_lst, shot_start_idx, shot_idx_lst):
+
+    #     single_shot_feat = []
+    #     for idx, one_shot in enumerate(shot_keyf_lst):
+    #         one_shot = [
+    #             self.test_transform(one_frame) for one_frame in one_shot
+    #         ]
+    #         one_shot = torch.stack(one_shot, dim=0)
+    #         single_shot_feat.append(one_shot)
+
+    #     single_shot_feat = torch.stack(single_shot_feat, dim=0)
+
+    #     shot_feat = []
+    #     for idx, shot_idx in enumerate(shot_idx_lst):
+    #         shot_idx_ = shot_idx - shot_start_idx
+    #         _one_shot = single_shot_feat[shot_idx_]
+    #         shot_feat.append(_one_shot)
+
+    #     return shot_feat
+    
+    
     def get_batch_input(self, shot_keyf_lst, shot_start_idx, shot_idx_lst):
-
         single_shot_feat = []
-        for idx, one_shot in enumerate(shot_keyf_lst):
-            one_shot = [
-                self.test_transform(one_frame) for one_frame in one_shot
-            ]
-            one_shot = torch.stack(one_shot, dim=0)
-            single_shot_feat.append(one_shot)
 
-        single_shot_feat = torch.stack(single_shot_feat, dim=0)
+        for one_shot in shot_keyf_lst:
+            frames = [self.test_transform(f) for f in one_shot if f is not None]
+
+            if len(frames) == 0:
+                # Skip this shot entirely
+                continue
+
+            one_shot_tensor = torch.stack(frames, dim=0)  # (k, C, H, W)
+            single_shot_feat.append(one_shot_tensor)
+
+        if len(single_shot_feat) == 0:
+            # No valid shots at all → return empty
+            return []
+
+        single_shot_feat = torch.stack(single_shot_feat, dim=0)  # (S, k, C, H, W)
 
         shot_feat = []
-        for idx, shot_idx in enumerate(shot_idx_lst):
+        for shot_idx in shot_idx_lst:
             shot_idx_ = shot_idx - shot_start_idx
-            _one_shot = single_shot_feat[shot_idx_]
-            shot_feat.append(_one_shot)
+            if 0 <= shot_idx_ < single_shot_feat.shape[0]:
+                shot_feat.append(single_shot_feat[shot_idx_])
+            # else: skip silently
 
         return shot_feat
+
 
     def preprocess(self, inputs):
         logger.info('Begin shot detect......')
