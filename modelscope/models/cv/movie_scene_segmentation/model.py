@@ -162,9 +162,13 @@ class MovieSceneSegmentationModel(TorchModel):
             # Flatten the result: from [[img1], [img2], ...] to [img1, img2, ...]
             retrieved_frames_flat = [frame for sublist in retrieved_frames_nested for frame in sublist]
 
-            # 4. DISTRIBUTE: Create a lookup map from each timecode to its retrieved image.
-            # This handles cases where the detector might fail to retrieve a frame.
-            timecode_to_image_map = {tc: img for tc, img in zip(sorted_unique_timecodes, retrieved_frames_flat) if img is not None}
+            # 4. DISTRIBUTE: Create a lookup map.
+            # The KEY is the HASHABLE frame number, the VALUE is the image.
+            frame_num_to_image_map = {
+                tc.get_frames(): img 
+                for tc, img in zip(sorted_unique_timecodes, retrieved_frames_flat) 
+                if img is not None
+            }
 
             # 5. Reconstruct the original `batch_shot_keyf_lst` structure safely.
             batch_shot_keyf_lst = []
@@ -172,7 +176,8 @@ class MovieSceneSegmentationModel(TorchModel):
                 shot_frames = []
                 if shot_idx < len(shot_timecode_lst):
                     for tc in shot_timecode_lst[shot_idx]:
-                        img = timecode_to_image_map.get(tc)
+                        # Use the frame number to look up the image in our new map.
+                        img = frame_num_to_image_map.get(tc.get_frames())
                         if img:
                             shot_frames.append(img)
                 batch_shot_keyf_lst.append(shot_frames)
