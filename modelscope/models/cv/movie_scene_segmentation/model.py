@@ -123,12 +123,55 @@ class MovieSceneSegmentationModel(TorchModel):
 
             shot_start_idx = batch_shot_idx_lst[0][0]
             shot_end_idx = batch_shot_idx_lst[-1][-1]
-            batch_timecode_lst = {
-                i: shot_timecode_lst[i]
-                for i in range(shot_start_idx, shot_end_idx + 1)
-            }
-            batch_shot_keyf_lst = self.shot_detector.get_frame_img(
-                batch_timecode_lst, shot_start_idx, shot_num)
+            
+            # batch_timecode_lst = {
+            #     i: shot_timecode_lst[i]
+            #     for i in range(shot_start_idx, shot_end_idx + 1)
+            # }
+            # batch_shot_keyf_lst = self.shot_detector.get_frame_img(batch_timecode_lst, shot_start_idx, shot_num)
+            
+            
+             # --- START: ROBUST FRAME FETCHING LOGIC ---
+
+            # 1. GATHER all unique timecodes needed for this entire batch.
+            all_needed_timecodes = set()
+            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
+                if shot_idx < len(shot_timecode_lst):
+                    for tc in shot_timecode_lst[shot_idx]:
+                        all_needed_timecodes.add(tc)
+            
+            # 2. SORT the timecodes chronologically.
+            sorted_unique_timecodes = sorted(list(all_needed_timecodes))
+            
+            # 3. FETCH: Prepare a dummy dictionary for the existing get_frame_img function.
+            # Each timecode is treated as a separate "shot" with one keyframe.
+            timecode_dict_for_fetch = {idx: [tc] for idx, tc in enumerate(sorted_unique_timecodes)}
+
+            # Call the function. It will process this dictionary sequentially.
+            # The start_idx and num_shot parameters are now relative to our dummy dict.
+            retrieved_frames_nested = self.shot_detector.get_frame_img(
+                timecode_dict_for_fetch, 0, len(timecode_dict_for_fetch))
+            
+            # Flatten the result: from [[img1], [img2], ...] to [img1, img2, ...]
+            retrieved_frames_flat = [frame for sublist in retrieved_frames_nested for frame in sublist]
+
+            # 4. DISTRIBUTE: Create a lookup map from each timecode to its retrieved image.
+            # This handles cases where the detector might fail to retrieve a frame.
+            timecode_to_image_map = {tc: img for tc, img in zip(sorted_unique_timecodes, retrieved_frames_flat) if img is not None}
+
+            # 5. Reconstruct the original `batch_shot_keyf_lst` structure safely.
+            batch_shot_keyf_lst = []
+            for shot_idx in range(shot_start_idx, shot_end_idx + 1):
+                shot_frames = []
+                if shot_idx < len(shot_timecode_lst):
+                    for tc in shot_timecode_lst[shot_idx]:
+                        img = timecode_to_image_map.get(tc)
+                        if img:
+                            shot_frames.append(img)
+                batch_shot_keyf_lst.append(shot_frames)
+            
+            # --- END: ROBUST FRAME FETCHING LOGIC ---
+            
             inputs = self.get_batch_input(batch_shot_keyf_lst, shot_start_idx,
                                           batch_shot_idx_lst)
 
