@@ -134,14 +134,21 @@ class MovieSceneSegmentationModel(TorchModel):
              # --- START: ROBUST FRAME FETCHING LOGIC ---
 
             # 1. GATHER all unique timecodes needed for this entire batch.
-            all_needed_timecodes = set()
+            # 1. GATHER unique timecodes using a list + a helper set.
+            unique_timecodes_list = []
+            seen_frame_numbers = set() # This set will store a HASHABLE property (the frame number)
+
             for shot_idx in range(shot_start_idx, shot_end_idx + 1):
                 if shot_idx < len(shot_timecode_lst):
                     for tc in shot_timecode_lst[shot_idx]:
-                        all_needed_timecodes.add(tc)
+                        frame_num = tc.get_frames() # Get the hashable integer frame number
+                        if frame_num not in seen_frame_numbers:
+                            seen_frame_numbers.add(frame_num)
+                            unique_timecodes_list.append(tc) # Add the original object to our list
             
-            # 2. SORT the timecodes chronologically.
-            sorted_unique_timecodes = sorted(list(all_needed_timecodes))
+            # 2. SORT the list of unique FrameTimecode objects.
+            # We sort by frame number to guarantee chronological order.
+            sorted_unique_timecodes = sorted(unique_timecodes_list, key=lambda x: x.get_frames())
             
             # 3. FETCH: Prepare a dummy dictionary for the existing get_frame_img function.
             # Each timecode is treated as a separate "shot" with one keyframe.
